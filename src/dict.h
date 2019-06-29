@@ -52,12 +52,12 @@ typedef struct dictEntry {
         int64_t s64;
         double d;
     } v;
-    struct dictEntry *next;
+    struct dictEntry *next;//指向下个哈希表节点，形成链表, 解决冲突
 } dictEntry;
 
-typedef struct dictType {
+typedef struct dictType {//哈希表的多态
     uint64_t (*hashFunction)(const void *key);
-    void *(*keyDup)(void *privdata, const void *key);
+    void *(*keyDup)(void *privdata, const void *key);//复杂对象不可以直接拷贝存储
     void *(*valDup)(void *privdata, const void *obj);
     int (*keyCompare)(void *privdata, const void *key1, const void *key2);
     void (*keyDestructor)(void *privdata, void *key);
@@ -69,16 +69,16 @@ typedef struct dictType {
 typedef struct dictht {
     dictEntry **table;
     unsigned long size;
-    unsigned long sizemask;
+    unsigned long sizemask;//size掩码，计算索引时使用，总是等于 size - 1
     unsigned long used;
 } dictht;
 
 typedef struct dict {
     dictType *type;
-    void *privdata;
-    dictht ht[2];
+    void *privdata;//作为参数传递给dictType中类型相关的函数
+    dictht ht[2];//多余的一个rehash时使用
     long rehashidx; /* rehashing not in progress if rehashidx == -1 */
-    unsigned long iterators; /* number of iterators currently running */
+    unsigned long iterators; /* number of iterators currently running TODO*/ 
 } dict;
 
 /* If safe is set to 1 this is a safe iterator, that means, you can call
@@ -101,6 +101,7 @@ typedef void (dictScanBucketFunction)(void *privdata, dictEntry **bucketref);
 #define DICT_HT_INITIAL_SIZE     4
 
 /* ------------------------------- Macros ------------------------------------*/
+// 注意下，这边宏定义里的变量都有用括号括起来，保证变量运算的优先级
 #define dictFreeVal(d, entry) \
     if ((d)->type->valDestructor) \
         (d)->type->valDestructor((d)->privdata, (entry)->v.val)

@@ -143,6 +143,7 @@ int dictResize(dict *d)
     return dictExpand(d, minimal);
 }
 
+//扩容或者收缩
 /* Expand or create the hash table */
 int dictExpand(dict *d, unsigned long size)
 {
@@ -172,7 +173,7 @@ int dictExpand(dict *d, unsigned long size)
 
     /* Prepare a second hash table for incremental rehashing */
     d->ht[1] = n;
-    d->rehashidx = 0;
+    d->rehashidx = 0;//什么时候置为-1呢, ht[0]什么时候释放, 什么时候拷贝数据
     return DICT_OK;
 }
 
@@ -187,7 +188,7 @@ int dictExpand(dict *d, unsigned long size)
  * work it does would be unbound and the function may block for a long time. */
 int dictRehash(dict *d, int n) {
     int empty_visits = n*10; /* Max number of empty buckets to visit. */
-    if (!dictIsRehashing(d)) return 0;
+    if (!dictIsRehashing(d)) return 0;//渐进式rehash，没有标记不可以做，在expand函数在标记
 
     while(n-- && d->ht[0].used != 0) {
         dictEntry *de, *nextde;
@@ -206,12 +207,12 @@ int dictRehash(dict *d, int n) {
 
             nextde = de->next;
             /* Get the index in the new hash table */
-            h = dictHashKey(d, de->key) & d->ht[1].sizemask;
-            de->next = d->ht[1].table[h];
+            h = dictHashKey(d, de->key) & d->ht[1].sizemask; //用bit运算来代替取余
+            de->next = d->ht[1].table[h];//加de加到链表的最前面
             d->ht[1].table[h] = de;
             d->ht[0].used--;
             d->ht[1].used++;
-            de = nextde;
+            de = nextde;//每次都拷贝完整个完整的chain
         }
         d->ht[0].table[d->rehashidx] = NULL;
         d->rehashidx++;
@@ -237,6 +238,7 @@ long long timeInMilliseconds(void) {
     return (((long long)tv.tv_sec)*1000)+(tv.tv_usec/1000);
 }
 
+//分配时间(ms)来专门做rehash
 /* Rehash for an amount of time between ms milliseconds and ms+1 milliseconds */
 int dictRehashMilliseconds(dict *d, int ms) {
     long long start = timeInMilliseconds();
@@ -257,6 +259,7 @@ int dictRehashMilliseconds(dict *d, int ms) {
  * This function is called by common lookup or update operations in the
  * dictionary so that the hash table automatically migrates from H1 to H2
  * while it is actively used. */
+//没有安全迭代器时，做一步rehash
 static void _dictRehashStep(dict *d) {
     if (d->iterators == 0) dictRehash(d,1);
 }
@@ -266,7 +269,7 @@ int dictAdd(dict *d, void *key, void *val)
 {
     dictEntry *entry = dictAddRaw(d,key,NULL);
 
-    if (!entry) return DICT_ERR;
+    if (!entry) return DICT_ERR; //如果已经存在或者强制扩容失败，返回DICT_ERR
     dictSetVal(d, entry, val);
     return DICT_OK;
 }
@@ -330,7 +333,7 @@ int dictReplace(dict *d, void *key, void *val)
      * does not exists dictAdd will succeed. */
     entry = dictAddRaw(d,key,&existing);
     if (entry) {
-        dictSetVal(d, entry, val);
+        dictSetVal(d, entry, val);//新增
         return 1;
     }
 
@@ -339,9 +342,9 @@ int dictReplace(dict *d, void *key, void *val)
      * as the previous one. In this context, think to reference counting,
      * you want to increment (set), and then decrement (free), and not the
      * reverse. */
-    auxentry = *existing;
-    dictSetVal(d, existing, val);
-    dictFreeVal(d, &auxentry);
+    auxentry = *existing;//复制旧的entry
+    dictSetVal(d, existing, val);//设置entry的值
+    dictFreeVal(d, &auxentry);//释放旧的entry的值
     return 0;
 }
 
@@ -379,10 +382,10 @@ static dictEntry *dictGenericDelete(dict *d, const void *key, int nofree) {
             if (key==he->key || dictCompareKeys(d, key, he->key)) {
                 /* Unlink the element from the list */
                 if (prevHe)
-                    prevHe->next = he->next;
+                    prevHe->next = he->next;//将he从chain中删除
                 else
                     d->ht[table].table[idx] = he->next;
-                if (!nofree) {
+                if (!nofree) {//free he
                     dictFreeKey(d, he);
                     dictFreeVal(d, he);
                     zfree(he);
@@ -400,6 +403,7 @@ static dictEntry *dictGenericDelete(dict *d, const void *key, int nofree) {
 
 /* Remove an element, returning DICT_OK on success or DICT_ERR if the
  * element was not found. */
+//delete and free
 int dictDelete(dict *ht, const void *key) {
     return dictGenericDelete(ht,key,0) ? DICT_OK : DICT_ERR;
 }
@@ -425,6 +429,7 @@ int dictDelete(dict *ht, const void *key) {
  * // Do something with entry
  * dictFreeUnlinkedEntry(entry); // <- This does not need to lookup again.
  */
+//delete, not free
 dictEntry *dictUnlink(dict *ht, const void *key) {
     return dictGenericDelete(ht,key,1);
 }
@@ -439,6 +444,7 @@ void dictFreeUnlinkedEntry(dict *d, dictEntry *he) {
 }
 
 /* Destroy an entire dictionary */
+//TODO callback
 int _dictClear(dict *d, dictht *ht, void(callback)(void *)) {
     unsigned long i;
 
@@ -507,6 +513,7 @@ void *dictFetchValue(dict *d, const void *key) {
  * the fingerprint again when the iterator is released.
  * If the two fingerprints are different it means that the user of the iterator
  * performed forbidden operations against the dictionary while iterating. */
+// 指纹检查，防止Unsafe迭代器的非法操作
 long long dictFingerprint(dict *d) {
     long long integers[6], hash = 0;
     int j;
@@ -562,31 +569,32 @@ dictIterator *dictGetSafeIterator(dict *d) {
 dictEntry *dictNext(dictIterator *iter)
 {
     while (1) {
-        if (iter->entry == NULL) {
+        if (iter->entry == NULL) {//如果entry走到头,则取下一个index
             dictht *ht = &iter->d->ht[iter->table];
-            if (iter->index == -1 && iter->table == 0) {
+            if (iter->index == -1 && iter->table == 0) {//判断迭代器第一次使用
                 if (iter->safe)
-                    iter->d->iterators++;
+                    iter->d->iterators++;//加安全迭代器计数
                 else
-                    iter->fingerprint = dictFingerprint(iter->d);
+                    iter->fingerprint = dictFingerprint(iter->d);//非安全迭代器添加指纹
             }
-            iter->index++;
-            if (iter->index >= (long) ht->size) {
-                if (dictIsRehashing(iter->d) && iter->table == 0) {
+            iter->index++;//iter index++
+            if (iter->index >= (long) ht->size) {//迭代走到头
+                if (dictIsRehashing(iter->d) && iter->table == 0) {//继续变量table 1
                     iter->table++;
                     iter->index = 0;
                     ht = &iter->d->ht[1];
-                } else {
+                } else {//没有table 1 则推出
                     break;
                 }
             }
             iter->entry = ht->table[iter->index];
-        } else {
+        } else {//ertry没被删，则直接取nextEntry
             iter->entry = iter->nextEntry;
         }
         if (iter->entry) {
             /* We need to save the 'next' here, the iterator user
              * may delete the entry we are returning. */
+            //nextEntry是因为当前返回的entry可能会被删除,这时候就需要nextEntry来继续遍历
             iter->nextEntry = iter->entry->next;
             return iter->entry;
         }
@@ -786,7 +794,9 @@ static unsigned long rev(unsigned long v) {
  *
  * The function guarantees all elements present in the
  * dictionary get returned between the start and end of the iteration.
- * However it is possible some elements get returned multiple times.
+ * However it is possible some elements get returned multiple times. 
+ *
+ * 保证返回所有元素，但是有的元素可能会返回两遍
  *
  * For every element returned, the callback argument 'fn' is
  * called with 'privdata' as first argument and the dictionary entry
@@ -828,6 +838,11 @@ static unsigned long rev(unsigned long v) {
  * cursor does not need to restart if the table size gets bigger. It will
  * continue iterating using cursors without '1100' at the end, and also
  * without any other combination of the final 4 bits already explored.
+ *
+ * 原先遍历一个size为16的dict,遍历到1100, 之后该dict 扩容到64, 则hash为**1100的元素
+ * 已经被遍历到了，接下来继续遍历 **0010的元素, 不需要从头开始遍历
+ *
+ * dict 缩容时也是一样的，不需要重新开始遍历，可以接着遍历
  *
  * Similarly when the table size shrinks over time, for example going from
  * 16 to 8, if a combination of the lower three bits (the mask for size 8
@@ -876,9 +891,11 @@ unsigned long dictScan(dict *d,
         m0 = t0->sizemask;
 
         /* Emit entries at cursor */
+        //对整个bucket进行函数调用
         if (bucketfn) bucketfn(privdata, &t0->table[v & m0]);
         de = t0->table[v & m0];
         while (de) {
+           //对bucket内的单个entry进行函数调用
             next = de->next;
             fn(privdata, de);
             de = next;
@@ -907,6 +924,7 @@ unsigned long dictScan(dict *d,
         m1 = t1->sizemask;
 
         /* Emit entries at cursor */
+        //遍历t0
         if (bucketfn) bucketfn(privdata, &t0->table[v & m0]);
         de = t0->table[v & m0];
         while (de) {
@@ -917,6 +935,7 @@ unsigned long dictScan(dict *d,
 
         /* Iterate over indices in larger table that are the expansion
          * of the index pointed to by the cursor in the smaller table */
+        //遍历t1
         do {
             /* Emit entries at cursor */
             if (bucketfn) bucketfn(privdata, &t1->table[v & m1]);
@@ -991,20 +1010,21 @@ static long _dictKeyIndex(dict *d, const void *key, uint64_t hash, dictEntry **e
     if (existing) *existing = NULL;
 
     /* Expand the hash table if needed */
-    if (_dictExpandIfNeeded(d) == DICT_ERR)
+    if (_dictExpandIfNeeded(d) == DICT_ERR)//如果需要强制扩容，且扩容失败，返回-1
         return -1;
     for (table = 0; table <= 1; table++) {
+      //如果table 1里面有(正在扩容)，会返回table1里面的index
         idx = hash & d->ht[table].sizemask;
         /* Search if this slot does not already contain the given key */
         he = d->ht[table].table[idx];
         while(he) {
             if (key==he->key || dictCompareKeys(d, key, he->key)) {
-                if (existing) *existing = he;
+                if (existing) *existing = he; //output返回已经存在的值
                 return -1;
             }
             he = he->next;
         }
-        if (!dictIsRehashing(d)) break;
+        if (!dictIsRehashing(d)) break;//如果没有rehash,不需要去第二个table里查找
     }
     return idx;
 }
